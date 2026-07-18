@@ -1,0 +1,81 @@
+rules_version = '2';
+
+// Roles: top_manager (full access), team_leader (dashboard + lead-source data +
+// own lead entries), call_manager (own lead entries only). Role + operatorId
+// for the signed-in user live in users/{uid}, written only by a top_manager
+// (via the in-app admin panel).
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function myProfile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isTopManager() {
+      return signedIn() && myProfile().role == 'top_manager';
+    }
+
+    function isTeamLeader() {
+      return signedIn() && myProfile().role == 'team_leader';
+    }
+
+    function isCallManager() {
+      return signedIn() && myProfile().role == 'call_manager';
+    }
+
+    function myOperatorId() {
+      return myProfile().operatorId;
+    }
+
+    function bootstrapDone() {
+      return exists(/databases/$(database)/documents/meta/bootstrap);
+    }
+
+    // One-time self-bootstrap: before any top_manager exists, a freshly signed-up
+    // user may make *themselves* a top_manager. Once meta/bootstrap is written,
+    // this path closes and every further account can only be created by an
+    // existing top_manager via the in-app admin panel.
+    match /users/{uid} {
+      allow get: if signedIn() && (request.auth.uid == uid || isTopManager());
+      allow list: if isTopManager();
+      allow create: if isTopManager()
+        || (request.auth.uid == uid && request.resource.data.role == 'top_manager' && !bootstrapDone());
+      allow update, delete: if isTopManager();
+    }
+
+    match /meta/bootstrap {
+      allow get: if true;
+      allow create: if signedIn() && request.resource.data.done == true;
+      allow update, delete: if isTopManager();
+    }
+
+    match /operators/{operatorId} {
+      allow read: if signedIn();
+      // KPI targets, start date, etc. are assigned manually and exclusively by
+      // a Top Manager — operators and team leaders only ever view their own.
+      allow create, update, delete: if isTopManager();
+    }
+
+    match /operatorEntries/{entryId} {
+      allow read: if isTopManager() || isTeamLeader()
+        || (isCallManager() && resource.data.operatorId == myOperatorId());
+      allow create, update: if isTopManager() || isTeamLeader()
+        || (isCallManager() && request.resource.data.operatorId == myOperatorId());
+      allow delete: if isTopManager();
+    }
+
+    match /targetologistEntries/{date} {
+      allow read: if signedIn();
+      allow write: if isTopManager() || isTeamLeader();
+    }
+
+    match /settings/{docId} {
+      allow read: if signedIn();
+      allow write: if isTopManager();
+    }
+  }
+}
